@@ -1,0 +1,12 @@
+{
+  "totalFixes": 1,
+  "patternMatches": 0,
+  "aiFallbacks": 1,
+  "timeSaved": 30,
+  "recentFixes": [
+    {
+      "jobName": "package",
+      "timeSaved": 30
+    }
+  ]
+}

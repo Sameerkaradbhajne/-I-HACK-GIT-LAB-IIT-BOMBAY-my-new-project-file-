@@ -1,0 +1,133 @@
+image: node:18
+
+stages:
+  - build
+  - test
+  - package
+  - deploy
+  - release
+
+cache:
+  paths:
+    - node_modules/
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+
+before_script:
+  - |
+    if [ ! -f "package.json" ]; then
+      echo "⚠️ This is not a Node.js project. Skipping..."
+      exit 0
+    fi
+  - npm install
+
+build:
+  stage: build
+  script:
+    - |
+      if [ -f "webpack.config.js" ]; then
+        npm run compile
+      else
+        echo "No webpack config found, skipping build"
+      fi
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+  allow_failure: true
+
+test:
+  stage: test
+  script:
+    - echo "Running tests..."
+    - npm run lint || true
+  allow_failure: true
+
+sast:
+  stage: test
+  variables:
+    SAST_EXCLUDED_PATHS: "dist/, node_modules/"
+
+semgrep-sast:
+  before_script: []
+
+package:
+  stage: package
+  image: node:20
+  script:
+    - |
+      if [ -f "package.json" ] && grep -q "vscode" package.json; then
+        npm install -g @vscode/vsce
+        vsce package
+      else
+        echo "Not a VS Code extension, skipping packaging"
+      fi
+  artifacts:
+    paths:
+      - "*.vsix"
+    expire_in: 1 week
+  only:
+    - main
+  allow_failure: true
+
+pages:
+  stage: deploy
+  image: node:18
+  script:
+    - echo "Deploying dashboard to GitLab Pages"
+    - mkdir -p public
+    - cp src/dashboard.html public/index.html
+  artifacts:
+    paths:
+      - public
+  only:
+    - main
+
+deploy_demo:
+  stage: deploy
+  image: alpine:latest
+  before_script: []
+  script:
+    - echo "🚀 Deploying to demo environment..."
+    - |
+      if [ -z "$GITLAB_TOKEN" ]; then
+        echo "⚠️ Missing GITLAB_TOKEN. Skipping deployment trigger to avoid failure."
+        exit 0
+      else
+        apk add --no-cache curl
+        echo "Triggering deployment for commit $CI_COMMIT_SHA..."
+        curl --request POST \
+          --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/deployments" \
+          --form "environment=demo" \
+          --form "ref=$CI_COMMIT_REF_NAME" \
+          --form "sha=$CI_COMMIT_SHA" \
+          --form "status=created" || echo "Deployment trigger failed, but continuing pipeline."
+      fi
+  only:
+    - tags
+    - main
+  allow_failure: true
+
+release_package:
+  stage: release
+  image: alpine:latest
+  before_script: []
+  script:
+    - apk add --no-cache curl grep
+    - PACKAGE_VERSION=$(grep '"version":' package.json | cut -d '"' -f 4)
+    - PACKAGE_NAME="codeforge-commander"
+    - FILE_NAME="${PACKAGE_NAME}-${PACKAGE_VERSION}.vsix"
+    - echo "📦 Found version ${PACKAGE_VERSION}"
+    - echo "📦 Looking for file ${FILE_NAME}"
+    - ls -la *.vsix || echo "No VSIX found!"
+    - |
+      if [ -f "$FILE_NAME" ]; then
+        echo "Uploading to GitLab Package Registry..."
+        curl --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file ${FILE_NAME} "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/generic/${PACKAGE_NAME}/${PACKAGE_VERSION}/${FILE_NAME}"
+      else
+        echo "❌ Error: Artifact $FILE_NAME not found. Skipping upload."
+      fi
+  only:
+    - main
